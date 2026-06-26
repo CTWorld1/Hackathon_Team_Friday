@@ -8,22 +8,27 @@ Two shapes flow through the pipeline:
 - ``Event``           — produced by Member 1 (ingest/parse), consumed by M2 (LLM)
                         and M3 (validation).
 - ``ValidatedOutput`` — produced by Member 3 (validation), consumed by M4 (output).
-                        Owned by Member 3; defined there when that work lands.
+                        Owned by Member 3; its concrete model lives in
+                        ``member3_validate/schema.py`` (``ValidatedLogEvent``).
 
 Reference pipeline flow (see Docs/Group_Roles.md)::
 
     reader -> prefilter -> parser  =>  Event  =>  LLM  =>  validate  =>  output
+
+``Event`` is a plain ``dict`` at runtime (a ``TypedDict`` for static typing). This
+is deliberate: Members 2 and 3 consume it with ``dict`` access (``event["..."]`` /
+``event.get(...)``), so the whole chain speaks one type and M4 needs no conversion
+at the seam.
 """
 
-from dataclasses import dataclass
+from typing import TypedDict
 
 
-@dataclass(frozen=True)
-class Event:
+class Event(TypedDict):
     """A single, independent log event produced by Member 1.
 
-    One log line in, one ``Event`` out. Each event is self-contained — there is
-    no cross-line state, which is what satisfies "each line treated
+    One log line in, one ``Event`` dict out. Each event is self-contained — there
+    is no cross-line state, which is what satisfies "each line treated
     independently, no interference."
 
     Fields (the M1 -> M2/M3 contract):
