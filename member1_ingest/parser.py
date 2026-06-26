@@ -1,7 +1,7 @@
 """Deterministic regex parsing — extracts 3 of the 4 fields, no LLM.
 
 Turns ``(line_number, raw_text)`` tuples into :class:`~shared.interfaces.Event`
-objects. This is the hybrid design's fast path: the regex pulls ``service_name``,
+dicts. This is the hybrid design's fast path: the regex pulls ``service_name``,
 ``raw_timestamp`` and ``severity`` so the LLM only ever handles remediation.
 
 Two non-negotiables (Docs/Group_Roles.md):
@@ -9,6 +9,9 @@ Two non-negotiables (Docs/Group_Roles.md):
   pattern captures it in its own group precisely so it can be ignored here.
 - A line that does not match the pattern is NOT dropped. It flows through with
   ``service_name="unknown"`` and the full line as its message.
+
+Events are plain ``dict``s (typed as :class:`~shared.interfaces.Event`) so M2 and
+M3 can consume them directly with dict access.
 """
 
 from shared.interfaces import Event
@@ -16,7 +19,7 @@ from member1_ingest.patterns import DEFAULT_LOG_PATTERN
 
 
 def parse_line(line_number, raw_text, pattern=DEFAULT_LOG_PATTERN):
-    """Build an :class:`Event` from a single ``(line_number, raw_text)``.
+    """Build an :class:`Event` dict from a single ``(line_number, raw_text)``.
 
     On a match: ``raw_timestamp`` is ``"<date> <time>"`` (pid excluded),
     ``service_name`` is the component, ``severity`` is the level token, and
@@ -50,7 +53,7 @@ def parse_line(line_number, raw_text, pattern=DEFAULT_LOG_PATTERN):
 
 
 def parse(lines, pattern=DEFAULT_LOG_PATTERN):
-    """Map a stream of ``(line_number, raw_text)`` tuples to ``Event`` objects.
+    """Map a stream of ``(line_number, raw_text)`` tuples to ``Event`` dicts.
 
     Stays a generator so the reader -> prefilter -> parser chain remains
     streaming end to end.
