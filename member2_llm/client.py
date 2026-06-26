@@ -9,12 +9,14 @@ MODEL = "gemma2:2b"
 
 logger = logging.getLogger(__name__)
 
+# Model-level payload (what the LLM returns). The external pipeline contract
+# {suggested_remediation, severity_mismatch} is derived from this in `remediate`.
 FALLBACK = {
     "suggested_remediation": "investigation_required",
-    "severity_mismatch": False
+    "is_failure": False
 }
 
-REQUIRED_KEYS = {"suggested_remediation", "severity_mismatch"}
+REQUIRED_KEYS = {"suggested_remediation", "is_failure"}
 
 
 def _strip_code_fences(raw: str) -> str:
@@ -34,17 +36,17 @@ def _normalize_payload(payload: object) -> dict:
         raise ValueError("LLM output must contain exactly the required keys")
 
     remediation = payload["suggested_remediation"]
-    severity_mismatch = payload["severity_mismatch"]
+    is_failure = payload["is_failure"]
 
     if not isinstance(remediation, str) or not remediation.strip():
         raise ValueError("suggested_remediation must be a non-empty string")
 
-    if not isinstance(severity_mismatch, bool):
-        raise ValueError("severity_mismatch must be a boolean")
+    if not isinstance(is_failure, bool):
+        raise ValueError("is_failure must be a boolean")
 
     return {
         "suggested_remediation": remediation.strip(),
-        "severity_mismatch": severity_mismatch,
+        "is_failure": is_failure,
     }
 
 
