@@ -1,0 +1,16 @@
+# Raw Log Triage Pipeline (Track 2) — dependencies
+# See Docs/Group_Roles.md "Libraries" for rationale.
+
+# --- Core runtime ---
+pydantic>=2.0        # M3: JSON schema definition + validation ("validated" output)
+ollama>=0.3.0        # M2: LLM calls (gemma2:2b) with format="json" structured output
+orjson>=3.9          # M4: fast JSON serialization for the webhook payload
+typer>=0.12          # M4: CLI entry point (clean UX; argparse is the dep-free alt)
+rich>=13.0           # Optional: log/progress visibility during dev
+
+# --- Testing ---
+pytest>=7.0          # All members. (Member 1 ingest runs on stdlib `re` at runtime.)
+
+# Note: Member 1 (reader/prefilter/parser) has NO third-party runtime deps —
+# it uses only the stdlib (`re`, `dataclasses`). The packages above belong to
+# Members 2–4.
