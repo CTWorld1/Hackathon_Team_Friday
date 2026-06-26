@@ -1,0 +1,34 @@
+4-Person Task Breakdown
+Person 1 — Environment Setup + Input Parser (Min 0–1.5h)
+Verify Ollama + Gemma2:2b is running locally for the whole team (ollama run gemma2:2b)
+
+Download and save the sample data file locally
+
+Write load_input(filepath) — reads the file, returns clean chunks the model can process
+
+Once done, help Person 2 stress-test the model call
+
+Person 2 — Prompt Engineer + Model Call (Min 15–3h)
+Write the system prompt forcing Gemma to return only the required format (JSON for Track 2, commit message for Track 1) — no filler text
+
+Build call_gemma(system_prompt, chunk) using Ollama's Python SDK or subprocess
+
+This is the hardest job — test on one chunk at a time and iterate until output is consistent
+
+Person 3 — Output Validator (Hour 1.5–3.5h)
+Write validate_output(raw_text) that checks Gemma's response is properly formatted
+
+Track 2: confirm JSON has all 4 required fields and passes json.loads()
+
+Track 1: confirm commit message starts with a valid Conventional Commit prefix (feat:, fix:, etc.)
+
+Handle bad/malformed output — catch errors and either retry or log the failure clearly
+
+Person 4 (You) — Pipeline Glue + Testing + README (Hour 2.5–5h)
+Wire all three functions into a single script: load_input() → call_gemma() → validate_output() → write results to output file
+
+Make it run as one command: python main.py <input_file>
+
+Test on a second unseen file during the edge case hour (Hour 4–5)
+
+Write a short README with setup steps and a usage example for submission
