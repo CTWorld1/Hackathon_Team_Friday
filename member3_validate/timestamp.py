@@ -1,15 +1,20 @@
-from member3_validate.timestamp import parse_hdfs_timestamp
+from datetime import datetime, timezone
 
 
-def test_parse_hdfs_timestamp():
-    parsed_time, fallback_used = parse_hdfs_timestamp("081109 203615")
+def parse_hdfs_timestamp(raw_timestamp: str) -> tuple[datetime, bool]:
+    """
+    Convert HDFS timestamp format into a Python datetime.
 
-    assert parsed_time.isoformat() == "2008-11-09T20:36:15"
-    assert fallback_used is False
+    Example:
+    "081109 203615" -> 2008-11-09T20:36:15
 
+    Returns:
+        (parsed_datetime, fallback_used)
+    """
 
-def test_bad_timestamp_uses_fallback():
-    parsed_time, fallback_used = parse_hdfs_timestamp("bad timestamp")
-
-    assert parsed_time is not None
-    assert fallback_used is True
+    try:
+        parsed_time = datetime.strptime(raw_timestamp.strip(), "%y%m%d %H%M%S")
+        return parsed_time, False
+    except Exception:
+        fallback_time = datetime.now(timezone.utc)
+        return fallback_time, True
