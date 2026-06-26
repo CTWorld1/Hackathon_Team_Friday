@@ -1,8 +1,8 @@
 from datetime import datetime, timezone
 
-The HDFS sample uses ``yyMMdd HHmmss`` (e.g. ``081109 203615`` ->
-``2008-11-09T20:36:15``). Production logs will differ, so the format string is a
-parameter, not a hardcoded assumption.
+# The HDFS sample uses ``yyMMdd HHmmss`` (e.g. ``081109 203615`` ->
+# ``2008-11-09T20:36:15``). Production logs will differ, so the format string is a
+# parameter, not a hardcoded assumption.
 
 def parse_hdfs_timestamp(raw_timestamp: str) -> tuple[datetime, bool]:
     """
