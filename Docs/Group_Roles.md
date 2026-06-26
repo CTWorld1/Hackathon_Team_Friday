@@ -4,30 +4,42 @@ Execution plan, team split, folder structure, and role instructions.
 
 ---
 
-## ⚠️ Read This First — Two Architectural Risks
+## ⚠️ Read This First — Architectural Notes
 
-**1. Per-line independent LLM calls on gigabytes of logs is a non-starter.**
-Sending every line to `gemma2:2b` independently on a 1GB log (~5–10M lines) at even 50ms/call is *days* of runtime, and 99.9% of those lines are benign noise. That uses an LLM as a regex engine and defeats the stated friction.
+**1. Don't use the LLM as a regex engine.** A cheap deterministic pre-filter eliminates benign noise (INFO/DEBUG dominate these logs) *before* the LLM. With the **hybrid design**, regex also extracts 3 of the 4 fields, so the LLM runs on a tiny fraction of lines and only for remediation. This is what makes the pipeline fast and robust.
 
-**Fix:** A cheap **deterministic pre-filter** must eliminate benign noise *before* the LLM sees anything. The LLM only runs on candidate anomaly lines. This is not optional.
+**2. Single-line scope.** These logs are single-line structured events (no multi-line stack traces). Each line is an independent event — which literally satisfies "each line treated independently, no interference." **No event grouper is needed.**
 
-**2. "Each line independent, no interference" conflicts with finding the crash line.**
-Multi-line stack traces are a *single logical event* spanning many lines. Strict per-line independence shreds a Java/Python traceback into ~40 meaningless fragments and loses the actual root-cause line.
-
-**Resolution:** Work at the **event level**, not the line level.
-- "Independent" means *events do not share state or context across LLM calls* — each call holds no memory of any other.
-- It does **not** mean cutting stack traces apart. A grouped multi-line event is the unit of independence.
-
-**3. `gemma2:2b` is small.** It will hallucinate `suggested_remediation` and sometimes emit malformed JSON. The validation layer is load-bearing and needs a retry + repair loop. Do not treat it as a nice-to-have.
+**3. gemma2:2b is small** — it hallucinates and emits malformed JSON. But in the hybrid design it's off the critical path for 3 fields; on LLM failure, remediation falls back to `investigation_required` and the record is still valid and useful. Validation + a 1–2 retry repair loop still applies.
 
 ---
 
-## Two Decisions to Make Before Anyone Writes Code
+## Decisions — Status
 
-1. **Line-level vs event-level** → Pick **event-level**, or the crash root-cause line gets shredded.
-2. **NDJSON vs JSON array output** → Ask the DB / webhook consumer. Default to **NDJSON** (one object per line) for streaming.
+✅ **Language: Python.**
+✅ **Output: NDJSON** (one JSON object per line).
+✅ **Log shape: single-line structured events.** No multi-line stack traces in scope. **The event grouper is CUT** — see note below.
+✅ **LLM role: HYBRID.** Regex extracts `service_name`, `timestamp`, `error_severity`. The LLM (gemma2:2b) only generates `suggested_remediation` and performs **one** verification check (below).
+✅ **Sample logs available** — but see the ⚠️ on error coverage.
 
-Both block downstream work. Lock them in hour one.
+### Reference format (HDFS-style — DO NOT hardcode; production will differ)
+
+```
+081109 203615 148 INFO dfs.DataNode$PacketResponder: PacketResponder 1 for block blk_X terminating
+└──┬──┘ └──┬──┘ └┬┘ └─┬┘ └──────────┬──────────┘  └──────────────┬──────────────┘
+ date   time   pid  level        component                     message
+yyMMdd HHmmss        ENUM      → service_name                  → message body
+```
+
+- **Timestamp is non-ISO:** `081109 203615` = `yyMMdd HHmmss`, no timezone, no millis, 2-digit year. Must be parsed to ISO 8601 (`2008-11-09T20:36:15`). The `148` after the time is the **pid, NOT part of the timestamp** — a guaranteed bug if someone parses `203615 148` as one value.
+- **service_name** = the component field (`dfs.DataNode$PacketResponder`).
+- **error_severity** = the level token (`INFO`/`WARN`/`ERROR`/`FATAL`) — regex-extracted, then verified by LLM.
+- Write the regex to be **swappable** (in `patterns.py` / config), since production format will not match this exactly.
+
+
+### "LLM verifies" — scoped
+
+`verify` means exactly one thing: **sanity-check the regex-derived severity against the message text.** E.g., regex tagged a line `INFO` but the message contains `Exception`/`failed`/`corrupt` → LLM flags a mismatch. This is a yes/no question, which gemma2:2b handles well. Do **not** expand "verify" beyond this — broader verification on a 2B model produces noise.
 
 ---
 
@@ -53,58 +65,62 @@ Both block downstream work. Lock them in hour one.
 
 ---
 
-### Member 1 — Ingestion & Pre-Filter
-**Most important role. Assign your strongest person.** Owns reading the stream and killing noise *before* the LLM.
+### Member 1 — Ingestion, Pre-Filter & Parsing
+**Most important role.** Owns reading the stream, killing noise *before* the LLM, and regex-extracting the 3 deterministic fields.
 
 ```
 member1_ingest/
 ├── reader.py          # streaming line reader (never load full file into memory)
-├── prefilter.py       # regex/keyword noise rejection + severity heuristics
-├── event_grouper.py   # groups multi-line stack traces into single events
-├── patterns.py        # compiled regex constants
+├── prefilter.py       # keyword/severity noise rejection
+├── parser.py          # regex-extract service_name, raw timestamp, severity, message
+├── patterns.py        # SWAPPABLE compiled regex (format not hardcoded)
 └── tests/
-    └── test_prefilter.py
+    ├── test_prefilter.py
+    └── test_parser.py    # incl. the pid-is-not-timestamp trap
 ```
 
 **Instructions:**
-- `reader.py`: Read with a **generator** yielding lines/chunks. Never `f.read()` the whole file — that's the gigabytes trap. Use `for line in open(path)`.
+- `reader.py`: Read with a **generator** yielding lines. Never `f.read()` the whole file. Use `for line in open(path)`.
 - `prefilter.py`:
-  - Rejection list: `INFO`, `DEBUG`, healthcheck pings, heartbeat lines.
-  - Inclusion list: `ERROR`, `FATAL`, `CRITICAL`, `Exception`, `panic`, `OOMKilled`, `segfault`, traceback markers.
-  - **Default on ambiguous lines: KEEP.** False negatives (missing a crash) are worse than false positives (wasting an LLM call).
-- `event_grouper.py`: This resolves the per-line vs per-event conflict.
-  - Detect continuation lines: leading whitespace, `at com.x.y`, `Caused by:`, `File "..."`, etc.
-  - Attach them to the preceding error line as **one event**.
-  - **Output of this module is the unit of "independence."**
-- **Output:** a generator of candidate event objects: `{raw_text, line_number, prelim_severity}`.
+  - Reject `INFO`/`DEBUG`/healthcheck/heartbeat lines.
+  - Keep `WARN`/`ERROR`/`FATAL`/`CRITICAL`/`Exception`/`panic`/`failed`/`corrupt` etc.
+  - **Default on ambiguous: KEEP.** Missing a crash is worse than wasting an LLM call.
+- `parser.py` — extract per line, deterministically (no LLM):
+  - `service_name` ← component field (e.g. `dfs.DataNode$PacketResponder`)
+  - `raw_timestamp` ← date + time tokens **only** (e.g. `081109 203615`). **Do NOT swallow the pid** (the number after the time). This is the #1 parsing bug — test it explicitly.
+  - `severity` ← level token
+  - `message` ← remainder after the colon
+  - On a line that doesn't match the pattern: emit it with `service_name="unknown"` and let it flow through — do not drop it.
+- `patterns.py`: regex lives here and is **swappable via config**. Production format will differ from the HDFS sample; do not bake the sample format into logic elsewhere.
+- **Output:** a generator of event objects: `{raw_text, line_number, service_name, raw_timestamp, severity, message}`.
+- **No grouper.** Single-line scope — each line is its own independent event. This is what satisfies "each line treated independently, no interference."
 
 ---
 
 ### Member 2 — LLM Layer (Gemma / Ollama)
-Owns model interaction and the prompt.
+Owns model interaction. **Scope narrowed: the LLM does NOT extract the 4 fields.** It only (a) generates `suggested_remediation` and (b) verifies severity.
 
 ```
 member2_llm/
 ├── client.py          # ollama wrapper, model="gemma2:2b"
-├── prompt.py          # system + few-shot prompt templates
-├── extractor.py       # takes one event -> raw model JSON dict
+├── prompt.py          # remediation + verification prompt templates
+├── remediate.py       # event -> {suggested_remediation, severity_mismatch: bool}
 └── tests/
-    └── test_extractor.py
+    └── test_remediate.py
 ```
 
 **Instructions:**
 - `client.py`:
-  - Use `ollama.chat(model="gemma2:2b", format="json", messages=[...])`.
-  - Set `options={"temperature": 0}` — you want deterministic extraction, not creativity.
-  - Wrap in a timeout + max-retries handler.
-- **Concurrency reality check:** `gemma2:2b` on ollama serves requests serially per model instance. Don't promise parallelism you can't deliver. If you want throughput, use a bounded `concurrent.futures.ThreadPoolExecutor` feeding ollama — but **benchmark first**, local ollama may queue anyway.
-- **Non-interference guarantee:** Each call sends ONLY one event's text. No conversation history, no prior context. The function takes a string, returns a dict, holds no memory. State this explicitly in the code.
-- `prompt.py` — the system prompt must:
-  - (a) state the exact 4 fields,
-  - (b) include 2–3 few-shot examples (`gemma2:2b` badly needs them),
-  - (c) instruct output of **ONLY** JSON.
-  - For `suggested_remediation`, constrain it: *"one sentence, only from evidence in the log line; if unknown, return `investigation_required`."* This curbs hallucination.
-- **Hard truth:** `gemma2:2b` will sometimes still fail. The job isn't perfect output — it's *predictable* output that Member 3 can validate and reject.
+  - `ollama.chat(model="gemma2:2b", format="json", messages=[...])`, `options={"temperature": 0}`.
+  - Timeout + max-retries wrapper. **On total LLM failure, return `{"suggested_remediation": "investigation_required", "severity_mismatch": false}`** — the pipeline must survive gemma being down, since 3 of 4 fields don't need it.
+- **Concurrency:** gemma2:2b serves serially per instance. With the hybrid design the LLM runs on *far fewer* lines (only filtered anomalies), so throughput is much less of a concern. Benchmark before adding threads.
+- **Non-interference:** each call sends ONLY one event's message text. No history, no context. String in, dict out, no memory. State this in code.
+- `prompt.py` — the model gets the message text + the regex-derived severity, and must return JSON with exactly two keys:
+  - `suggested_remediation`: one sentence, **only** from evidence in the message; if unknown → `investigation_required`.
+  - `severity_mismatch`: `true` if the message text contradicts the given severity (e.g. severity says INFO but text says "Exception"/"failed"/"corrupt"), else `false`.
+  - Include 2–3 few-shot examples — gemma2:2b needs them.
+- **Do not let "verify" expand** beyond the severity yes/no check. Broader verification on a 2B model is noise.
+- **Hard truth:** gemma2:2b will still occasionally fail. The job is *predictable* output Member 3 can validate, plus a safe fallback.
 
 ---
 
@@ -114,24 +130,27 @@ Owns correctness of the final object. This is where "syntactically perfect JSON"
 ```
 member3_validate/
 ├── schema.py          # pydantic models
-├── validator.py       # parse model output, validate, repair/retry hook
+├── timestamp.py       # non-ISO -> ISO 8601 parser (swappable)
+├── validator.py       # assemble regex+LLM fields, validate, repair/retry hook
 ├── enums.py           # error_severity enum
 └── tests/
-    └── test_validator.py
+    ├── test_validator.py
+    └── test_timestamp.py
 ```
 
 **Instructions:**
-- `schema.py` — pydantic model:
-  - `service_name: str`
-  - `timestamp: datetime` (validate ISO 8601; if model returns garbage, fall back to the ingestion timestamp from Member 1)
-  - `error_severity: SeverityEnum`
-  - `suggested_remediation: str`
-- `error_severity` **must be an Enum** (`DEBUG` / `INFO` / `WARN` / `ERROR` / `FATAL`), not free text — otherwise gemma invents "kinda bad" and the DB schema breaks.
+- `schema.py` — pydantic model, assembled from **regex fields (M1) + LLM fields (M2)**:
+  - `service_name: str` ← from M1 regex
+  - `timestamp: datetime` ← from M1 `raw_timestamp`, parsed by `timestamp.py`
+  - `error_severity: SeverityEnum` ← from M1, **overridden/flagged** if M2 returned `severity_mismatch=true`
+  - `suggested_remediation: str` ← from M2
+- `timestamp.py`: convert the non-ISO format to ISO 8601. For the HDFS sample: `strptime("%y%m%d %H%M%S")` on `081109 203615` → `2008-11-09T20:36:15`. **Must be swappable** — production format differs. If parsing fails, fall back to file ingestion time and set a flag, never crash.
+- `error_severity` **must be an Enum** (`DEBUG`/`INFO`/`WARN`/`ERROR`/`FATAL`), not free text.
+- **Severity-mismatch handling:** if M2 flagged a mismatch, decide policy and write it down — recommended: escalate severity to at least `WARN` and add a marker, rather than trusting the regex level. Don't silently ignore the mismatch flag; it's the whole point of the verify step.
 - `validator.py`:
-  - Wrap parsing in try/except.
-  - On validation failure, do a **one-shot repair**: send the malformed output back through Member 2's layer with "fix this to match schema." Cap retries at 1–2, then route to a **dead-letter list**.
-  - **Never silently drop failures** — that's how you lose the one crash that mattered.
-- **Owns the seams.** Coordinate the interface contract with Member 2 (incoming dict shape) and Member 4 (outgoing validated object) early.
+  - Validate the assembled object against the schema.
+  - On failure, one-shot repair via M2's layer, cap retries 1–2, then **dead-letter**. Never silently drop.
+- **Owns the seams.** Lock the field contract with M1 (regex fields in) and M2 (LLM fields in) and M4 (validated object out) early.
 
 ---
 
@@ -177,7 +196,11 @@ log-triage/
 
 It won't be code — it's the **interface contracts** between members.
 
-Define `shared/interfaces.py` (the event object shape, the validated-output shape) **in hour one**. All four agree. Then work in parallel. Skip this and you'll spend day two reconciling four incompatible dict formats.
+Define `shared/interfaces.py` **in hour one**. The two shapes everyone codes against:
+- **Event (M1 → M2/M3):** `{raw_text, line_number, service_name, raw_timestamp, severity, message}`
+- **Validated output (M3 → M4):** `{service_name, timestamp, error_severity, suggested_remediation}`
+
+All four agree, then work in parallel. Skip this and you'll spend day two reconciling incompatible dict formats.
 
 ---
 
@@ -187,23 +210,25 @@ Define `shared/interfaces.py` (the event object shape, the validated-output shap
 raw log stream
    │
    ▼
-[M1] reader  ──► prefilter ──► event_grouper
-   │ (drops benign noise; groups multi-line traces)
+[M1] reader ──► prefilter ──► parser
+   │ (drops INFO/noise; regex-extracts service_name, raw_timestamp, severity, message)
    ▼
-candidate events  { raw_text, line_number, prelim_severity }
+event  { raw_text, line_number, service_name, raw_timestamp, severity, message }
    │
    ▼
-[M2] llm extractor  (gemma2:2b, temp=0, format=json, stateless per call)
-   │
+[M2] LLM (gemma2:2b, temp=0, format=json, stateless)
+   │  in:  message + severity     out: { suggested_remediation, severity_mismatch }
+   │  on failure: { "investigation_required", false }  ← pipeline survives
    ▼
-raw model dict
-   │
+[M3] assemble (regex fields + LLM fields)
+   │  timestamp.py: 081109 203615 -> 2008-11-09T20:36:15
+   │  apply severity_mismatch policy
    ▼
-[M3] validator  ──► pydantic schema  ──► (repair retry ×1–2 on fail) ──► dead-letter on final fail
+   pydantic validate ──► (repair retry ×1–2) ──► dead-letter on final fail
    │
    ▼
 validated event object
    │
    ▼
-[M4] output  ──► NDJSON ──► webhook DB injection
+[M4] output ──► NDJSON ──► webhook DB injection
 ```
