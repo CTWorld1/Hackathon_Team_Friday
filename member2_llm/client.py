@@ -47,13 +47,15 @@ def _normalize_payload(payload: object) -> dict:
         "severity_mismatch": severity_mismatch,
     }
 
+
 def chat_json(messages: list[dict], model: str = MODEL, retries: int = 3) -> dict:
     for attempt in range(retries):
         try:
             response = ollama.chat(
                 model=model,
                 messages=messages,
-                options={"temperature": 0}
+                format="json",
+                options={"temperature": 0},
             )
             raw = response["message"]["content"]
             parsed = json.loads(_strip_code_fences(raw))

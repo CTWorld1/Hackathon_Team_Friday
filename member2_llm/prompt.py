@@ -11,21 +11,22 @@ No explanation. No markdown. No extra text."""
 
 FEW_SHOT_EXAMPLES = [
     {
-                "message": "INFO Heartbeat received from node worker-04",
-                "severity": "INFO",
-                "output": '{"suggested_remediation": "No action required; this is a routine heartbeat event.", "severity_mismatch": false}'
+        "message": "INFO Heartbeat received from node worker-04",
+        "severity": "INFO",
+        "output": '{"suggested_remediation": "No action required; this is a routine heartbeat event.", "severity_mismatch": false}'
     },
     {
-                "message": "WARN Disk usage at 91% on /dev/sda1, threshold is 90%",
-                "severity": "WARN",
-                "output": '{"suggested_remediation": "Free disk space on /dev/sda1 or expand storage.", "severity_mismatch": false}'
+        "message": "INFO Database connection failed after 3 retries",
+        "severity": "INFO",
+        "output": '{"suggested_remediation": "Investigate the database connection failure and retry path.", "severity_mismatch": true}'
     },
     {
-                "message": "INFO Database connection failed after 3 retries",
-                "severity": "INFO",
-                "output": '{"suggested_remediation": "Investigate the database connection failure and retry path.", "severity_mismatch": true}'
+        "message": "INFO Service status report received from node worker-04",
+        "severity": "INFO",
+        "output": '{"suggested_remediation": "investigation_required", "severity_mismatch": false}'
     }
 ]
+
 
 def build_remediation_messages(message: str, severity: str) -> list[dict]:
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
